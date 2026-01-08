@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网易云音乐下载器 - 网页版</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <main class="container my-4">
+        <h2 class="text-center mb-4">网易云音乐下载器</h2>
+
+        <ul class="nav nav-tabs mb-3" id="mainTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="download-tab-btn" data-bs-toggle="tab" data-bs-target="#download-tab" type="button" role="tab" aria-controls="download-tab" aria-selected="true">下载歌曲</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="sort-tab-btn" data-bs-toggle="tab" data-bs-target="#sort-tab" type="button" role="tab" aria-controls="sort-tab" aria-selected="false">歌单操作</button>
+            </li>
+        </ul>
+        <div class="tab-content" id="mainTabContent">
+            <!-- 下载 Tab (无改动) -->
+            <section class="tab-pane fade show active" id="download-tab" role="tabpanel" aria-labelledby="download-tab-btn">
+                <div class="card card-body">
+                    <form id="download-form">
+                        <fieldset class="mb-4">
+                            <legend class="h5 mb-3">核心设置</legend>
+                            <div class="mb-3">
+                                <label class="form-label d-block">解析方式:</label>
+                                <div class="row row-cols-1 row-cols-md-3 g-3" id="parse-method-container">
+                                    <div class="col">
+                                        <div class="card h-100 parse-method-card selected" data-parse-method="playlist">
+                                            <div class="card-body text-center">
+                                                <h5 class="card-title">歌单解析</h5>
+                                                <p class="card-text text-muted small">适用于歌单链接</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="card h-100 parse-method-card" data-parse-method="link">
+                                            <div class="card-body text-center">
+                                                <h5 class="card-title">单曲解析</h5>
+                                                <p class="card-text text-muted small">适用于单曲链接</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col">
+                                        <div class="card h-100 parse-method-card" data-parse-method="album">
+                                            <div class="card-body text-center">
+                                                <h5 class="card-title">专辑解析</h5>
+                                                <p class="card-text text-muted small">适用于专辑链接</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <input type="hidden" id="parse-method" name="parse_method" value="playlist">
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="save-dir" class="form-label">保存目录:</label>
+                                <input type="text" class="form-control" id="save-dir" name="save_dir" value="{{ default_music_dir }}" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="playlist-url" class="form-label">链接或ID:</label>
+                                <input type="text" class="form-control" id="playlist-url" name="playlist_url" placeholder="输入链接或ID，例如: https://music.163.com/#/playlist?id=123 或 123" required>
+                            </div>
+                        </fieldset>
+
+                        <fieldset>
+                            <legend class="h5 mb-3">下载选项</legend>
+                            <!-- 移除 align-items-center/end，改为 align-items-start，并调整歌词列的结构 -->
+                            <div class="row align-items-start g-3 mb-3"> 
+                                <div class="col-md-4">
+                                    <label for="quality" class="form-label">音质:</label>
+                                    <select class="form-select" id="quality" name="quality">
+                                        <option value="standard">标准</option>
+                                        <option value="exhigh" selected>极高</option>
+                                        <option value="lossless">无损</option>
+                                        <option value="hires">Hi-Res</option>
+                                        <option value="jymaster">超清母带</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="download-api" class="form-label">下载API:</label>
+                                    <select class="form-select" id="download-api" name="download_api">
+                                        <option value="suxiaoqing">苏晓晴API</option>
+                                        <option value="ss22y">SS22YAPI</option>
+                                        <option value="vkeys">落月API</option>
+                                        <option value="kxzjoker">看戏仔API</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label" style="visibility: hidden;">占位符:</label> 
+                                    <div class="d-flex align-items-center">
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="checkbox" id="download-lyrics-original" name="download_lyrics_original" value="true" checked>
+                                            <label class="form-check-label" for="download-lyrics-original">原歌词</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="checkbox" id="download-lyrics-translated" name="download_lyrics_translated" value="true">
+                                            <label class="form-check-label" for="download-lyrics-translated">翻译歌词</label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </fieldset>
+
+                        <div class="d-flex flex-wrap gap-2 mt-4">
+                             <div id="primary-actions">
+                                <button type="submit" class="btn btn-primary" id="start-download-btn">开始下载</button>
+                                <button type="button" class="btn btn-danger" id="stop-download-btn" disabled>停止下载</button>
+                                <button type="button" class="btn btn-secondary" id="clear-log-btn">清空日志</button>
+                             </div>
+                             <div id="retry-actions" class="d-none">
+                                <button type="button" class="btn btn-success" id="retry-download-btn">重新下载失败项</button>
+                                <button type="button" class="btn btn-secondary" id="back-to-download-btn">返回</button>
+                            </div>
+                        </div>
+                    </form>
+                    <div class="row g-3 mt-3">
+                        <section class="col-lg-6">
+                            <h5 class="mb-3">下载进度</h5>
+                            <div class="progress" role="progressbar" aria-label="下载进度" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="height: 25px;">
+                                <div class="progress-bar" id="progress-bar" style="width: 0%">0%</div>
+                            </div>
+                            <p class="mt-2 mb-0 text-muted" id="status-label">准备就绪</p>
+                        </section>
+                        <section class="col-lg-6">
+                             <h5 class="mb-3">下载日志</h5>
+                             <textarea class="form-control log-area" id="log-text" readonly></textarea>
+                        </section>
+                    </div>
+                </div>
+            </section>
+            <!-- 歌单操作 Tab (已修改) -->
+            <section class="tab-pane fade" id="sort-tab" role="tabpanel" aria-labelledby="sort-tab-btn">
+                <div class="card card-body">
+                    <div class="mb-3">
+                        <label for="sort-music-dir" class="form-label">音乐目录:</label>
+                        <div class="input-group">
+                             <input type="text" class="form-control" id="sort-music-dir" placeholder="与下载目录同步">
+                             <button class="btn btn-outline-secondary" type="button" id="refresh-playlists-btn">刷新列表</button>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                         <label class="form-label">检测到的歌单:</label>
+                         <div id="playlist-listbox" class="row g-2 playlist-grid">
+                             <!-- 歌单列表将在这里动态生成 -->
+                         </div>
+                    </div>
+                    <div class="d-flex align-items-center flex-wrap gap-2">
+                        <button class="btn btn-success" id="sort-playlist-btn">排序选中歌单</button>
+                        <div class="input-group" style="width: auto;">
+                            <!-- [修复] 修改为末尾编号，并更新ID和默认值 -->
+                            <span class="input-group-text">末尾歌曲编号:</span>
+                            <input type="number" class="form-control" id="sort-number" value="500" min="0" style="max-width: 100px;">
+                        </div>
+                        <button class="btn btn-warning" id="remove-numbering-btn">移除选中歌单编号</button>
+                        <button class="btn btn-primary ms-lg-auto" id="download-playlist-btn">下载该歌单</button>
+                    </div>
+                </div>
+            </section>
+        </div>
+        <!-- Toast 弹窗容器 (已修改) -->
+        <div class="toast-container position-fixed bottom-0 end-0 p-3">
+            <!-- [修复] 添加 text-bg-success 类作为默认样式 -->
+            <div id="appToast" class="toast text-bg-success" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="toast-header">
+                    <strong class="me-auto" id="toast-title">提示</strong>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+                <div class="toast-body" id="toast-body"></div>
+            </div>
+        </div>
+    </main>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/main.js"></script>
+</body>
+</html>

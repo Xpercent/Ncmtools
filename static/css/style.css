@@ -1,0 +1,68 @@
+/* static/css/style.css */
+
+/* --- 全局与布局 --- */
+body { 
+    padding-top: 1rem; 
+    padding-bottom: 1rem;
+}
+
+.container { 
+    max-width: 1200px; 
+}
+
+/* --- 下载 Tab --- */
+.parse-method-card {
+    cursor: pointer;
+    border: 1px solid var(--bs-border-color);
+    transition: all 0.2s ease-in-out;
+}
+.parse-method-card:hover {
+    border-color: var(--bs-primary);
+    transform: translateY(-2px);
+    box-shadow: 0 0.125rem 0.25rem rgba(var(--bs-primary-rgb), 0.15);
+}
+.parse-method-card.selected {
+    border-color: var(--bs-primary);
+    box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.25);
+    background-color: var(--bs-primary-bg-subtle);
+}
+
+.log-area {
+    height: 250px; /* 增加默认高度 */
+    font-family: monospace;
+    font-size: 0.85em;
+    white-space: pre-wrap;
+    overflow-y: auto;
+    resize: vertical;
+    transition: border-color 0.2s ease;
+}
+
+.progress-bar {
+    transition: width 0.4s ease;
+}
+
+
+/* --- 歌单操作 Tab --- */
+.playlist-grid {
+    min-height: 150px; /* 避免内容为空时塌陷 */
+    max-height: 400px;
+    overflow-y: auto;
+    border: 1px solid var(--bs-border-color);
+    border-radius: var(--bs-border-radius);
+    padding: 0.5rem;
+}
+
+.playlist-card {
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+    border: 1px solid var(--bs-border-color);
+}
+.playlist-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0.125rem 0.25rem rgba(var(--bs-body-color), 0.075);
+}
+.playlist-card.selected {
+    border-color: var(--bs-primary);
+    background-color: var(--bs-primary-bg-subtle);
+    box-shadow: 0 0 0 0.2rem rgba(var(--bs-primary-rgb), 0.25);
+}
