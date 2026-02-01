@@ -9,7 +9,11 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, ID3NoHeaderError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from .utils import sanitize_filename, normalize_ncm_url, normalize_artists
 from .Lyrics import merge_lyrics # 假设Lyrics.py在同级目录
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+'''
+#暂时失效
 HEADERS = {
     'Content-Type': 'application/json',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0',
@@ -116,6 +120,110 @@ def api_suxiaoqing_music(song_id: str, level: str = 'exhigh') -> dict:
         print(f"suxiaoqingAPI请求失败: {e}")
         return None
 
+'''
+
+
+def api_meorion_playlist(playlist_id: str):
+    """获取歌单信息"""
+    api_url = f"https://music.meorion.moe/api/getPlaylist?id={playlist_id}"
+    response = requests.get(api_url, timeout=30)
+
+    source_data = response.json()
+    
+    formatted_data = {
+        'id': playlist_id,
+        'name': source_data.get('name'),
+        'coverImgUrl': source_data.get('coverImage'),
+        'trackCount': source_data.get('songCount'),
+        'creator': source_data.get('creator')['name'],
+        'tracks': source_data.get('list', [])
+    }
+    return formatted_data
+
+def api_vkeys_music(song_num: str, level: str = 'exhigh'):
+    level_map = {
+        "standard": 2, "exhigh": 4, "lossless": 5, "hires": 6, "jymaster": 9
+    }
+    quality = level_map.get(level)
+    base_url = "https://api.vkeys.cn/v2/music/netease"
+    api_tasks = {
+        'url': f"{base_url}?id={song_num}&quality={quality}",
+        'lyric': f"{base_url}/lyric?id={song_num}"
+    }
+    try:
+        with requests.Session() as session:
+            def fetch(task):
+                key, url = task
+                try:
+                    resp = session.get(url, timeout=30)
+                    resp.raise_for_status()
+                    return key, resp.json().get('data', {})
+                except Exception as e:
+                    print(f"请求 {key} 失败: {e}")
+                    return key, {}
+
+            # 3. 并行执行
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                responses = dict(executor.map(fetch, api_tasks.items()))
+        
+        url_info = responses.get('url')
+        lyric = responses.get('lyric')
+        print(responses)
+        print("--------------------------------")
+        formatted_data = {
+            "status": 200,
+            "id": str(song_num),
+            "name": url_info.get('song'),
+            "pic": url_info.get('cover'),
+            "ar_name": url_info.get('singer'),
+            "al_name": url_info.get('album'),
+            "duration": url_info.get('interval'),
+            "level": url_info.get('quality'),
+            "size": str(url_info.get('size')) if url_info.get('size') is not None else None,
+            "url": url_info.get('url'),
+            "lyric": lyric.get('lrc'),
+            "tlyric": lyric.get('trans'),
+            "romalrc": lyric.get('roma'),
+            "klyric": ""
+        }
+        return formatted_data
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"落月API请求失败: {e}")
+        return None
+    
+def api_bugpk_music(song_num: str, level: str = 'exhigh'):
+    """BugPK API - 获取歌曲数据"""
+    api_url = f"https://api.bugpk.com/api/163_music/song?ids={song_num}&level={level}&type=json"
+    try:
+        response = requests.Session().get(api_url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        print(data)
+        print("--------------------------------")
+        if isinstance(data, dict) and data.get("url"):
+            # 格式化返回数据，使其与其他API格式一致
+            formatted_data = {
+                "status": 200,
+                "id": str(song_num),
+                "name": data.get("name"),
+                "pic": data.get("pic"),
+                "ar_name": data.get("ar_name"),
+                "al_name": data.get("al_name"),
+                #"duration": data.get("duration"),
+                "level": data.get("level"),
+                "size": str(data.get("size")) if data.get("size") is not None else None,
+                "url": data.get("url"),
+                "lyric": data.get("lyric"),
+                "tlyric": data.get("tlyric"),
+                "romalrc": data.get("romalrc"),
+                "klyric": data.get("klyric")
+            }
+            return formatted_data
+        return None
+    except (requests.exceptions.RequestException, ValueError) as e:
+        print(f"BugPK API请求失败: {e}")
+        return None
+
 def api_ss22y_music(song_num: str, level: str = 'exhigh'):
     base_url = "https://music.meorion.moe/api"
     # 定义任务映射：键名 -> 对应的 URL
@@ -169,93 +277,7 @@ def api_ss22y_music(song_num: str, level: str = 'exhigh'):
     except (requests.exceptions.RequestException, ValueError) as e:
         print(f"ss22yAPI请求失败: {e}")
         return None
-
-
-def api_vkeys_music(song_num: str, level: str = 'exhigh'):
-    level_map = {
-        "standard": 2, "exhigh": 4, "lossless": 5, "hires": 6, "jymaster": 9
-    }
-    quality = level_map.get(level)
-    base_url = "https://api.vkeys.cn/v2/music/netease"
-    api_tasks = {
-        'url': f"{base_url}?id={song_num}&quality={quality}",
-        'lyric': f"{base_url}/lyric?id={song_num}"
-    }
-    try:
-        with requests.Session() as session:
-            def fetch(task):
-                key, url = task
-                try:
-                    resp = session.get(url, timeout=30)
-                    resp.raise_for_status()
-                    # 按照你原来的逻辑，直接取 .json().get('data', {})
-                    return key, resp.json().get('data', {})
-                except Exception as e:
-                    print(f"请求 {key} 失败: {e}")
-                    return key, {}
-
-            # 3. 并行执行
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                responses = dict(executor.map(fetch, api_tasks.items()))
-        
-        url_info = responses.get('url')
-        lyric = responses.get('lyric')
-        print(responses)
-        print("--------------------------------")
-        formatted_data = {
-            "status": 200,
-            "id": str(song_num),
-            "name": url_info.get('song'),
-            "pic": url_info.get('cover'),
-            "ar_name": url_info.get('singer'),
-            "al_name": url_info.get('album'),
-            "duration": url_info.get('interval'),
-            "level": url_info.get('quality'),
-            "size": str(url_info.get('size')) if url_info.get('size') is not None else None,
-            "url": url_info.get('url'),
-            "lyric": lyric.get('lrc'),
-            "tlyric": lyric.get('trans'),
-            "romalrc": lyric.get('roma'),
-            "klyric": ""
-        }
-        return formatted_data
-    except (requests.exceptions.RequestException, ValueError) as e:
-        print(f"落月API请求失败: {e}")
-        return None
-
-def api_kxzjoker_music(song_num: str, level: str = 'exhigh'):
-    """看戏仔API - 获取歌曲数据"""
-    api_url = f"https://api.kxzjoker.cn/api/163_music?url=https://music.163.com/song?id={song_num}&level={level}&type=json"
-    try:
-        response = requests.Session().get(api_url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        print(data)
-        print("--------------------------------")
-        if isinstance(data, dict) and data.get("url"):
-            # 格式化返回数据，使其与其他API格式一致
-            formatted_data = {
-                "status": 200,
-                "id": str(song_num),
-                "name": data.get("name"),
-                "pic": data.get("pic"),
-                "ar_name": data.get("ar_name"),
-                "al_name": data.get("al_name"),
-                "duration": data.get("duration"),
-                "level": data.get("level"),
-                "size": str(data.get("size")) if data.get("size") is not None else None,
-                "url": data.get("url"),
-                "lyric": data.get("lyric"),
-                "tlyric": data.get("tlyric"),
-                "romalrc": data.get("romalrc"),
-                "klyric": data.get("klyric")
-            }
-            return formatted_data
-        return None
-    except (requests.exceptions.RequestException, ValueError) as e:
-        print(f"看戏仔API请求失败: {e}")
-        return None
-
+    
 def parse_music_source(parse_type: str, source_url: str):
     """
     根据解析类型解析音乐源
@@ -271,12 +293,13 @@ def parse_music_source(parse_type: str, source_url: str):
     if parse_type == 'playlist':
         # 歌单解析
         playlist_id = normalize_ncm_url(source_url, "id", "playlist")
-        return api_suxiaoqing_playlist(playlist_id)
+        #return api_suxiaoqing_playlist(playlist_id)
+        return api_meorion_playlist(playlist_id)
     
-    elif parse_type == 'album':
-        # 专辑解析
-        album_id = normalize_ncm_url(source_url, "id", "album")
-        return api_suxiaoqing_album(album_id)
+    # elif parse_type == 'album':
+    #     # 专辑解析
+    #     album_id = normalize_ncm_url(source_url, "id", "album")
+    #     return api_suxiaoqing_album(album_id)
     
     elif parse_type == 'link':
         # 链接解析（单曲）
@@ -329,12 +352,11 @@ class MusicDownloader:
         """根据API名称获取歌曲数据。"""
         api_to_use = api_name or self.api_name
         api_map = {
-            'suxiaoqing': api_suxiaoqing_music,
-            'ss22y': api_ss22y_music,
             'vkeys': api_vkeys_music,
-            'kxzjoker': api_kxzjoker_music
+            'bugpk': api_bugpk_music,
+            'ss22y': api_ss22y_music,
         }
-        api_func = api_map.get(api_to_use, api_suxiaoqing_music)
+        api_func = api_map.get(api_to_use, api_vkeys_music)
         
         try:
             data = api_func(song_id, self.quality)
@@ -392,9 +414,6 @@ class MusicDownloader:
             return False
 
     def download_song(self, song_url, download_lyrics=True, api_name=None, track_info=None, download_lyrics_translated=False):
-        """
-        下载单首歌曲。本版本回归原始代码的清晰逻辑，修复所有已知问题。
-        """
         song_id = normalize_ncm_url(song_url, "id", "song")
 
         # 步骤 1: [歌单/专辑模式] 基于track_info进行高效的本地预检查。
@@ -460,5 +479,8 @@ class MusicDownloader:
         return "downloaded", filename_base, song_id
     
 if __name__ == '__main__':
-    a = api_suxiaoqing_music("3313253205", "exhigh")
+    #a = api_suxiaoqing_music("3313253205", "exhigh")
+    a = api_vkeys_music("3313253205", "exhigh")
+    #a = api_bugpk_music("3313253205", "exhigh")
+    #a = api_meorion_playlist("14467442486")
     print(a)
