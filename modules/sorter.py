@@ -64,13 +64,9 @@ class MusicSorter:
     def sort_playlist(self, playlist_dir_str: str, tracks: list, start_number: int) -> dict:
         """
         根据歌单信息对目录中的歌曲文件进行排序和重命名。
-
-        :param playlist_dir_str: 歌单目录的路径字符串。
-        :param tracks: 从json文件中解析出的歌曲信息列表。
-        :param start_number: 排序的起始编号（通常是歌曲总数）。
-        :return: 一个包含处理结果的字典。
         """
         playlist_dir = Path(playlist_dir_str)
+        # 获取目录下所有音频文件 {文件名: 后缀}
         audio_files = self.get_audio_files(playlist_dir)
         sorted_file = playlist_dir / ".sorted"
         
@@ -82,47 +78,69 @@ class MusicSorter:
         print(f"\n开始排序歌单，共 {len(tracks)} 首歌曲...")
 
         # 逆序处理 tracks 列表，从末尾歌曲开始编号
+        # 这样最后一首歌获得 start_number (例如 500)，第一首获得 start_number - len + 1
         for track in reversed(tracks):
-            #title = track.get('full_title', '')
-            title = sanitize_filename(f"{track.get('name','')} - {track.get('artists')}")
-            if not title:
+            # 1. 获取歌曲名和歌手名
+            song_name = track.get('name', '').strip()
+            artist_name = track.get('ar', '').strip()
+            
+            # 2. 构建期望的文件名 (用于搜索匹配)
+            # 格式：歌曲名 - 歌手名
+            raw_title = f"{song_name} - {artist_name}"
+
+            # 3. 清洗文件名 
+            search_title = sanitize_filename(raw_title)
+
+            if not search_title:
                 continue
             
-            matched_result = self.find_best_match(title, audio_files)
+            # 4. 尝试寻找最佳匹配文件
+            # 在 audio_files 字典中查找最接近 search_title 的文件名
+            matched_result = self.find_best_match(search_title, audio_files)
+            
             if matched_result:
                 matched_name, matched_ext = matched_result
-                current_file_name = f"{matched_name}{matched_ext}"
-                current_file_path = playlist_dir / current_file_name
                 
-                # 从audio_files中删除已匹配项，防止重复匹配
-                del audio_files[matched_name]
+                # 匹配成功后，从 audio_files 中移除该文件，防止后续歌曲重复匹配到同一个文件
+                if matched_name in audio_files:
+                    del audio_files[matched_name]
                 
-                # 构建新的带编号的文件名
-                # 注意：这里使用json中的title，以防文件名被用户修改过
-                new_name = f"{current_number}. {title}{matched_ext}"
+                # 5. 准备重命名操作
+                # 这里的 current_file_path 是找到的本地现有文件
+                current_file_path = playlist_dir / f"{matched_name}{matched_ext}"
+                new_name = f"{current_number}. {search_title}{matched_ext}"
                 new_path = playlist_dir / new_name
                 
                 if current_file_path != new_path:
                     rename_operations.append(('audio', current_file_path, new_path))
                 
+                # 记录到日志列表，用于写入 .sorted 文件
                 renamed_files_log.append(new_name)
                 
-                # 检查并处理对应的.lrc歌词文件
+                # 6. 检查并处理对应的 .lrc 歌词文件
                 lrc_file = current_file_path.with_suffix('.lrc')
                 if lrc_file.exists():
-                    new_lrc_name = f"{current_number}. {title}.lrc"
+                    new_lrc_name = f"{current_number}. {search_title}.lrc"
                     new_lrc_path = playlist_dir / new_lrc_name
                     rename_operations.append(('lrc', lrc_file, new_lrc_path))
             else:
-                not_found_tracks.append(title)
+                # 记录未找到的歌曲 (使用原始标题以便阅读)
+                not_found_tracks.append(raw_title)
             
+            # 序号递减
             current_number -= 1
         
-        # 批量执行重命名操作
+        # 7. 批量执行重命名操作
         processed_count = 0
         error_count = 0
         for file_type, old_path, new_path in rename_operations:
             try:
+                # 简单的防覆盖检查
+                if new_path.exists() and new_path != old_path:
+                     print(f"警告: 目标文件已存在，跳过覆盖: {new_path.name}")
+                     error_count += 1
+                     continue
+
                 old_path.rename(new_path)
                 print(f"成功重命名 ({file_type}): {old_path.name} -> {new_path.name}")
                 if file_type == 'audio':
@@ -131,15 +149,17 @@ class MusicSorter:
                 print(f"重命名文件失败: {old_path.name} -> {new_path.name}, 原因: {e}")
                 error_count += 1
         
-        # 仅在有成功重命名的文件时才更新.sorted文件
+        # 8. 更新 .sorted 记录文件
+        # 仅在有成功重命名的文件时才写入
         if renamed_files_log:
             try:
                 with open(sorted_file, 'w', encoding='utf-8') as f:
-                    for name in sorted(renamed_files_log):  # 写入时可以排序，便于查看
+                    for name in sorted(renamed_files_log):  # 排序写入，便于人工查看
                         f.write(name + '\n')
             except Exception as e:
-                print(f"更新.sorted文件时出错: {e}")
+                print(f"更新 .sorted 文件时出错: {e}")
         
+        # 9. 输出结果摘要
         print("\n排序完成！")
         if not_found_tracks:
             print(f"未找到匹配文件的歌曲 ({len(not_found_tracks)} 首):")

@@ -8,372 +8,317 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, Response
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 导入重构后的模块
+# 导入自定义模块
 from modules.utils import sanitize_filename
 from modules.downloader import MusicDownloader, parse_music_source
 from modules.sorter import MusicSorter
 
-# --- 应用配置 ---
-MAX_WORKERS = 4
+# --- 配置 ---
+MAX_WORKERS = 8
 app = Flask(__name__, template_folder='templates', static_folder='static')
 
 class DownloadManager:
-    """封装下载任务的状态和逻辑，解决全局变量问题。"""
+    """管理下载任务的状态和线程"""
     def __init__(self):
         self.is_downloading = False
         self.thread = None
         self.message_queue = queue.Queue()
-        self.failed_songs = []
+        self.failed_songs = [] 
         self.current_playlist_dir = None
         self.stop_event = threading.Event()
 
-    def _put_message(self, msg_type, **kwargs):
-        """向前端推送消息。"""
+    def _emit(self, msg_type, **kwargs):
         kwargs['type'] = msg_type
         self.message_queue.put(kwargs)
 
-    def start_download(self, **kwargs):
+    def start_task(self, **kwargs):
         if self.is_downloading:
-            return False, "已有下载任务在进行中"
+            return False, "已有任务在运行中"
         
         self.is_downloading = True
         self.failed_songs.clear()
         self.stop_event.clear()
         
-        self.thread = threading.Thread(target=self._download_task, kwargs=kwargs, daemon=True)
+        self.thread = threading.Thread(target=self._run_new_download, kwargs=kwargs, daemon=True)
         self.thread.start()
         return True, "下载任务已启动"
 
-    def retry_download(self, **kwargs):
+    def retry_task(self, **kwargs):
         if self.is_downloading:
-            return False, "已有下载任务在进行中"
-        
+            return False, "已有任务在运行中"
+        if not self.current_playlist_dir:
+            return False, "无法找到上次下载目录"
+            
         self.is_downloading = True
-        self.stop_event.clear() # 重置停止事件
-        
-        # 重新下载时，失败列表应基于传入的 song_ids，并在任务开始时清空
+        self.stop_event.clear()
         self.failed_songs.clear()
         
-        self.thread = threading.Thread(target=self._retry_task, kwargs=kwargs, daemon=True)
+        kwargs['playlist_dir'] = self.current_playlist_dir
+        self.thread = threading.Thread(target=self._run_retry_download, kwargs=kwargs, daemon=True)
         self.thread.start()
-        return True, "重新下载任务已启动"
+        return True, "重试任务已启动"
 
-    def stop_download(self):
+    def stop(self):
         if not self.is_downloading:
-            return False, "没有正在进行的下载任务"
-        
+            return False, "当前无任务运行"
         self.stop_event.set()
-        self._put_message('log', message="用户请求停止下载...")
+        self._emit('log', message="正在请求停止下载...")
         return True, "停止信号已发送"
 
-    def _download_task(self, save_dir, playlist_url, parse_type, quality, dl_lyrics, dl_lyrics_translated, api):
-        """后台下载线程执行的实际任务。"""
+    # --- 内部逻辑 ---
+
+    def _run_new_download(self, save_dir, playlist_url, parse_type, quality, dl_lyrics, dl_trans, api):
         try:
-            self._put_message('log', message=f"正在解析链接...")
-            playlist_data = parse_music_source(parse_type, playlist_url)
-            tracks = playlist_data.get('tracks', [])
+            self._emit('log', message="正在解析链接信息...")
+            data = parse_music_source(parse_type, playlist_url)
             
-            # 确定并创建保存目录
-            base_save_path = Path(save_dir)
-            subfolder_map = {'playlist': 'playlist', 'album': 'album', 'link': 'songs'}
-            subfolder = subfolder_map.get(parse_type, 'misc')
-            
-            playlist_title = sanitize_filename(playlist_data.get('name') or f"unnamed_{int(time.time())}")
-            
-            if parse_type == 'link':
-                playlist_save_dir = base_save_path / subfolder
+            # --- 关键重构点：识别数据结构 ---
+            base = Path(save_dir)
+            if 'tracks' in data:
+                # 歌单/专辑模式
+                tracks = data['tracks']
+                pl_name = sanitize_filename(data.get('name') or f"PL_{int(time.time())}")
+                sub = 'album' if parse_type == 'album' else 'playlist'
+                dest_dir = base / sub / pl_name
             else:
-                playlist_save_dir = base_save_path / subfolder / playlist_title
+                # 单曲模式：data 只有 {'id': 'xxx'}
+                tracks = [data] # 包装成列表方便循环，但字典里没 name
+                dest_dir = base / 'songs'
             
-            playlist_save_dir.mkdir(parents=True, exist_ok=True)
-            self.current_playlist_dir = str(playlist_save_dir)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            self.current_playlist_dir = str(dest_dir)
+            
+            self._emit('log', message=f"保存目录: {dest_dir.name}")
+            self._emit('log', message=f"解析成功: 共 {len(tracks)} 首歌曲")
 
-            self._put_message('log', message=f"歌曲将保存到: {self.current_playlist_dir}")
-            self._put_message('log', message=f"使用API: {api}, 音质: {quality}")
-            self._put_message('log', message=f"共找到 {len(tracks)} 首歌曲，开始下载...")
+            self._process_common_download(dest_dir, tracks, quality, dl_lyrics, dl_trans, api)
             
-            downloader = MusicDownloader(self.current_playlist_dir, quality, api)
-            self._execute_downloads(downloader, tracks, dl_lyrics, dl_lyrics_translated, api)
-            
-            # 任务结束后，保存歌单信息文件
-            if parse_type != 'link' and (len(tracks) - len(self.failed_songs)) > 0:
-                json_path = playlist_save_dir / f"{playlist_title}.json"
-                json_path.write_text(json.dumps(playlist_data, ensure_ascii=False, indent=4), encoding='utf-8')
-                self._put_message('log', message=f"✓ 歌单信息文件已保存: {json_path.name}")
+            # 如果是歌单，保存一下 JSON 供后续排序使用
+            if 'tracks' in data and not self.stop_event.is_set():
+                (dest_dir / f"{pl_name}.json").write_text(
+                    json.dumps(data, ensure_ascii=False, indent=4), encoding='utf-8'
+                )
 
         except Exception as e:
-            error_msg = f"下载过程中出现严重错误: {e}"
-            self._put_message('log', message=error_msg)
-            self._put_message('error', message=error_msg)
+            self._emit('error', message=f"下载任务出错: {e}")
         finally:
             self.is_downloading = False
 
-    def _retry_task(self, playlist_dir, song_ids, quality, dl_lyrics, dl_lyrics_translated, api):
-        """后台重新下载任务。"""
+    def _run_retry_download(self, playlist_dir, songs_to_retry, quality, dl_lyrics, dl_trans, api):
         try:
-            self.current_playlist_dir = playlist_dir
-            self._put_message('log', message=f"开始重新下载 {len(song_ids)} 首歌曲...")
-            self._put_message('log', message=f"将保存到: {playlist_dir}")
-            
-            downloader = MusicDownloader(playlist_dir, quality, api)
-            
-            # 将 song_ids 转换为 tracks 格式以复用执行逻辑
-            tracks = [{'id': song_id} for song_id in song_ids]
-            self._execute_downloads(downloader, tracks, dl_lyrics, dl_lyrics_translated, api)
-
+            self._emit('log', message=f"开始重试下载 {len(songs_to_retry)} 首歌曲...")
+            self._process_common_download(Path(playlist_dir), songs_to_retry, quality, dl_lyrics, dl_trans, api)
         except Exception as e:
-            error_msg = f"重新下载过程中出现严重错误: {e}"
-            self._put_message('log', message=error_msg)
-            self._put_message('error', message=error_msg)
+            self._emit('error', message=f"重试任务出错: {e}")
         finally:
             self.is_downloading = False
 
-    def _execute_downloads(self, downloader, tracks, dl_lyrics, dl_lyrics_translated, api):
-        """统一的下载执行逻辑，支持多线程和停止。"""
+    def _process_common_download(self, dest_dir, tracks, quality, dl_lyrics, dl_trans, api):
+        downloader = MusicDownloader(dest_dir, quality, api)
+        total = len(tracks)
         results = []
+        
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_track = {
-                executor.submit(
-                    downloader.download_song, str(track['id']), dl_lyrics, api, track, dl_lyrics_translated
-                ): track for track in tracks
-            }
+            future_map = {}
+            for t in tracks:
+                # 只有当字典里有 'name' 时，才认为元数据完整
+                # 如果没有 'name'（如单曲模式），则传 None，强制 downloader 去调 API 获取详情
+                track_info_param = t if 'name' in t else None
+                
+                future = executor.submit(
+                    downloader.download_song, 
+                    str(t['id']), 
+                    dl_lyrics, 
+                    api, 
+                    track_info_param, 
+                    dl_trans
+                )
+                future_map[future] = t
             
-            total = len(tracks)
-            for i, future in enumerate(as_completed(future_to_track), 1):
+            for i, future in enumerate(as_completed(future_map), 1):
                 if self.stop_event.is_set():
-                    # 取消所有未完成的 future
-                    for f in future_to_track: f.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
                     break
                 
-                track = future_to_track[future]
+                original_track = future_map[future]
                 try:
-                    status, filename, song_id = future.result()
-                    results.append({'status': status, 'song_id': song_id})
-                    if status == "downloaded":
-                        self._put_message('log', message=f"✓ 下载成功: {filename}")
-                    elif status == "skipped":
-                        self._put_message('log', message=f"→ 已跳过: {filename}")
+                    status, fname, sid = future.result()
+                    
+                    # 确定显示用的名称
+                    if fname:
+                        log_name = fname
+                    elif 'name' in original_track:
+                        log_name = f"{original_track['name']} - {original_track.get('ar', 'Unknown')}"
                     else:
-                        self.failed_songs.append(str(song_id))
-                        self._put_message('log', message=f"✗ 下载失败: ID {song_id}")
-                except Exception as exc:
-                    song_id = str(track['id'])
-                    self.failed_songs.append(song_id)
-                    results.append({'status': 'failed', 'song_id': song_id})
-                    self._put_message('log', message=f"✗ 处理歌曲 {song_id} 时出错: {exc}")
-                
-                self._put_message('progress', progress=(i / total) * 100, status_text=f"进度: {i}/{total}")
-        
-        # 任务结束总结
-        success_count = sum(1 for r in results if r['status'] in ['downloaded', 'skipped'])
-        failed_count = len(self.failed_songs)
-        
-        if self.stop_event.is_set():
-            msg = f"下载已停止。成功: {success_count}，失败: {failed_count}"
-            self._put_message('stopped', message=msg, has_failed=(failed_count > 0), failed_count=failed_count, success_count=success_count)
-        else:
-            msg = f"任务完成！成功: {success_count}，失败: {failed_count}"
-            self._put_message('done', message=msg, has_failed=(failed_count > 0), failed_count=failed_count, success_count=success_count)
+                        log_name = f"ID: {sid}"
 
-# 创建 DownloadManager 的单一实例
+                    if status == 'failed':
+                        # 记录失败时，如果原数据不全，尝试更新（便于前端显示）
+                        self.failed_songs.append(original_track)
+                        self._emit('log', message=f"✗ 下载失败: {log_name}")
+                    else:
+                        icon = "✓" if status == 'downloaded' else "→"
+                        self._emit('log', message=f"{icon} {status}: {log_name}")
+                    
+                    results.append(status)
+                    
+                except Exception as e:
+                    self.failed_songs.append(original_track)
+                    self._emit('log', message=f"✗ 线程异常: {e}")
+
+                self._emit('progress', progress=(i / total) * 100, status_text=f"进度: {i}/{total}")
+
+        success_cnt = results.count('downloaded') + results.count('skipped')
+        fail_cnt = len(self.failed_songs)
+        evt = 'stopped' if self.stop_event.is_set() else 'done'
+        msg = f"任务{'停止' if evt=='stopped' else '完成'}。成功: {success_cnt}, 失败: {fail_cnt}"
+        
+        self._emit(evt, message=msg, has_failed=(fail_cnt > 0), 
+                   failed_count=fail_cnt, success_count=success_cnt)
+
 manager = DownloadManager()
 
+# --- 辅助工具函数 ---
+
+def find_target_directory(base_dir, folder_name):
+    base = Path(base_dir)
+    for sub in ['playlist', 'album']:
+        path = base / sub / folder_name
+        if path.is_dir():
+            return path
+    return None
+
 # --- Flask 路由 ---
+
 @app.route('/')
 def index():
     if getattr(sys, 'frozen', False):
-        # 如果是打包后的exe文件，sys.executable 指向当前的 .exe 文件
-        app_base_path = Path(sys.executable).parent
+        app_base = Path(sys.executable).parent
     else:
-        # 否则是未打包的Python脚本，__file__ 指向脚本文件
-        app_base_path = Path(__file__).parent
-    default_music_dir = str(app_base_path / 'Music')
-    return render_template('index.html', default_music_dir=default_music_dir)
-
-@app.route('/start-download', methods=['POST'])
-def start_download_route():
-    data = request.form
-    success, message = manager.start_download(
-        save_dir=data.get('save_dir'),
-        playlist_url=data.get('playlist_url'),
-        parse_type=data.get('parse_method', 'playlist'),
-        quality=data.get('quality', 'exhigh'),
-        dl_lyrics=data.get('download_lyrics_original') == 'true',
-        dl_lyrics_translated=data.get('download_lyrics_translated') == 'true',
-        api=data.get('download_api', 'suxiaoqing')
-    )
-    return jsonify({'status': 'success' if success else 'error', 'message': message})
-
-@app.route('/retry-failed-songs', methods=['POST'])
-def retry_failed_songs_route():
-    data = request.json
-    song_ids = manager.failed_songs[:] # 复制列表以防万一
-    
-    # 重新下载时，使用上一次的歌单目录
-    playlist_dir = manager.current_playlist_dir
-    if not playlist_dir or not Path(playlist_dir).exists():
-        return jsonify({'status': 'error', 'message': '无法确定上次的歌单目录，请重新进行一次完整下载'})
-
-    success, message = manager.retry_download(
-        playlist_dir=playlist_dir,
-        song_ids=song_ids,
-        quality=data.get('quality', 'exhigh'),
-        dl_lyrics=data.get('download_lyrics', True),
-        dl_lyrics_translated=data.get('download_lyrics_translated', False),
-        api=data.get('download_api', 'suxiaoqing')
-    )
-    return jsonify({'status': 'success' if success else 'error', 'message': message})
-
-@app.route('/stop-download', methods=['POST'])
-def stop_download_route():
-    success, message = manager.stop_download()
-    return jsonify({'status': 'success' if success else 'error', 'message': message})
+        app_base = Path(__file__).parent
+    default_dir = app_base / 'Music'
+    return render_template('index.html', default_music_dir=str(default_dir))
 
 @app.route('/stream')
 def stream():
     def event_stream():
         while True:
             try:
-                message = manager.message_queue.get(timeout=30)
+                message = manager.message_queue.get(timeout=20)
                 yield f"data: {json.dumps(message)}\n\n"
             except queue.Empty:
-                yield ": heartbeat\n\n"
+                yield ": keep-alive\n\n"
     return Response(event_stream(), mimetype="text/event-stream")
+
+@app.route('/start-download', methods=['POST'])
+def start_download_route():
+    data = request.form
+    success, msg = manager.start_task(
+        save_dir=data.get('save_dir'),
+        playlist_url=data.get('playlist_url'),
+        parse_type=data.get('parse_method', 'playlist'),
+        quality=data.get('quality', 'exhigh'),
+        dl_lyrics=data.get('download_lyrics_original') == 'true',
+        dl_trans=data.get('download_lyrics_translated') == 'true',
+        api=data.get('download_api', 'vkeys')
+    )
+    return jsonify({'status': 'success' if success else 'error', 'message': msg})
+
+@app.route('/retry-failed-songs', methods=['POST'])
+def retry_failed_songs_route():
+    data = request.json
+    songs = data.get('songs') or manager.failed_songs
+    
+    if not songs:
+        return jsonify({'status': 'error', 'message': '没有需要重试的歌曲'})
+
+    success, msg = manager.retry_task(
+        songs_to_retry=list(songs),
+        quality=data.get('quality', 'exhigh'),
+        dl_lyrics=data.get('download_lyrics', True),
+        dl_trans=data.get('download_lyrics_translated', False),
+        api=data.get('download_api', 'vkeys')
+    )
+    return jsonify({'status': 'success' if success else 'error', 'message': msg})
+
+@app.route('/stop-download', methods=['POST'])
+def stop_download_route():
+    success, msg = manager.stop()
+    return jsonify({'status': 'success' if success else 'error', 'message': msg})
 
 @app.route('/get-failed-songs')
 def get_failed_songs():
-    return jsonify({'failed_songs': manager.failed_songs})
-
-# --- 歌单排序相关 API ---
-def _find_playlist_path(base_dir, playlist_name):
-    """辅助函数，在 'playlist' 和 'album' 子目录中查找歌单路径。"""
-    base_path = Path(base_dir)
-    for subfolder in ['playlist', 'album']:
-        path = base_path / subfolder / playlist_name
-        if path.is_dir():
-            return path
-    return None
+    return jsonify({'failed_songs': list(manager.failed_songs)})
 
 @app.route('/get-playlists')
 def get_playlists():
     path = request.args.get('path')
-    if not path or not Path(path).is_dir():
-        return jsonify({'playlists': [], 'message': '目录不存在或无效'}), 400
+    if not path or not Path(path).exists():
+        return jsonify({'playlists': [], 'message': '目录无效'}), 400
     
-    playlist_info = []
+    results = []
     base_path = Path(path)
     sorter = MusicSorter()
     
-    for type_name, subfolder in [('playlist', 'playlist'), ('album', 'album')]:
-        dir_path = base_path / subfolder
-        if dir_path.is_dir():
-            playlists = sorter.get_playlists(str(dir_path))
-            playlist_info.extend([{'name': p, 'type': type_name} for p in playlists])
-            
-    return jsonify({'playlists': playlist_info})
+    for type_name in ['playlist', 'album']:
+        target_dir = base_path / type_name
+        if target_dir.is_dir():
+            try:
+                names = sorter.get_playlists(str(target_dir))
+                results.extend([{'name': n, 'type': type_name} for n in names])
+            except Exception:
+                pass
+    return jsonify({'playlists': results})
 
 @app.route('/get-playlist-id')
 def get_playlist_id_route():
-    path = request.args.get('path')
-    playlist_name = request.args.get('playlist')
-    playlist_dir = _find_playlist_path(path, playlist_name)
-    
-    if not playlist_dir:
+    base_dir = request.args.get('path')
+    pl_name = request.args.get('playlist')
+    target_dir = find_target_directory(base_dir, pl_name)
+    if not target_dir:
         return jsonify({'message': '未找到歌单目录'}), 404
-        
-    # 查找JSON文件
-    json_files = list(playlist_dir.glob('*.json'))
-    if not json_files:
+    json_file = next(target_dir.glob('*.json'), None)
+    if not json_file:
         return jsonify({'message': '未找到歌单JSON文件'}), 404
-    
     try:
-        playlist_data = json.loads(json_files[0].read_text(encoding='utf-8'))
-        playlist_id = playlist_data.get('id')
-        if not playlist_id:
-            return jsonify({'message': 'JSON文件中没有ID字段'}), 404
-        return jsonify({'playlist_id': str(playlist_id)})
+        data = json.loads(json_file.read_text(encoding='utf-8'))
+        return jsonify({'playlist_id': str(data.get('id', ''))})
     except Exception as e:
-        return jsonify({'message': f'读取JSON文件失败: {e}'}), 500
+        return jsonify({'message': f'读取JSON失败: {e}'}), 500
 
 @app.route('/sort-playlist', methods=['POST'])
 def sort_playlist_route():
     data = request.json
     base_dir = data.get('base_dir')
-    playlist_name = data.get('playlist_name')
-    start_number = data.get('start_number', 500)
-    
-    if not all([base_dir, playlist_name]):
-        return jsonify({'status': 'error', 'message': '缺少必要参数'}), 400
-
+    pl_name = data.get('playlist_name')
+    start_num = data.get('start_number', 500)
+    target_dir = find_target_directory(base_dir, pl_name)
+    if not target_dir:
+        return jsonify({'status': 'error', 'message': f"未找到目录: {pl_name}"}), 404
     try:
-        sorter = MusicSorter()
-        # 尝试在playlist和album文件夹中查找
-        base_path = Path(base_dir)
-        playlist_dir = None
-        
-        # 先尝试playlist文件夹
-        playlist_path = base_path / 'playlist' / playlist_name
-        if playlist_path.exists() and playlist_path.is_dir():
-            playlist_dir = playlist_path
-        else:
-            # 再尝试album文件夹
-            album_path = base_path / 'album' / playlist_name
-            if album_path.exists() and album_path.is_dir():
-                playlist_dir = album_path
-        
-        if not playlist_dir:
-            return jsonify({'status': 'error', 'message': f"未找到歌单目录: {playlist_name}"}), 404
-        
-        # 查找JSON文件（可能文件名不完全匹配）
-        json_files = list(playlist_dir.glob('*.json'))
-        if not json_files:
-            return jsonify({'status': 'error', 'message': f"未找到歌单JSON文件"}), 404
-        json_file = json_files[0]  # 使用找到的第一个JSON文件
-        
-        with open(json_file, 'r', encoding='utf-8') as f:
-            playlist_data = json.load(f)
-        
-        tracks = playlist_data.get('tracks', [])
-        processed_count = sorter.sort_playlist(str(playlist_dir), tracks, start_number)
-        
-        return jsonify({'status': 'success', 'message': f"排序完成！共处理 {processed_count} 首歌曲。"})
+        json_file = next(target_dir.glob('*.json'), None)
+        if not json_file:
+            return jsonify({'status': 'error', 'message': "缺少排序所需的JSON文件"}), 404
+        pl_data = json.loads(json_file.read_text(encoding='utf-8'))
+        tracks = pl_data.get('tracks', [])
+        cnt = MusicSorter().sort_playlist(str(target_dir), tracks, start_num)
+        return jsonify({'status': 'success', 'message': f"排序完成！处理了 {cnt} 首歌曲。"})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': f'排序失败: {e}'}), 500
-
+        return jsonify({'status': 'error', 'message': f"排序异常: {e}"}), 500
 
 @app.route('/remove-numbering', methods=['POST'])
 def remove_numbering_route():
     data = request.json
     base_dir = data.get('base_dir')
-    playlist_name = data.get('playlist_name')
-
-    if not all([base_dir, playlist_name]):
-        return jsonify({'status': 'error', 'message': '缺少必要参数'}), 400
-
+    pl_name = data.get('playlist_name')
+    target_dir = find_target_directory(base_dir, pl_name)
+    if not target_dir:
+        return jsonify({'status': 'error', 'message': f"未找到目录: {pl_name}"}), 404
     try:
-        sorter = MusicSorter()
-        # 尝试在playlist和album文件夹中查找
-        base_path = Path(base_dir)
-        playlist_dir = None
-        
-        # 先尝试playlist文件夹
-        playlist_path = base_path / 'playlist' / playlist_name
-        if playlist_path.exists() and playlist_path.is_dir():
-            playlist_dir = playlist_path
-        else:
-            # 再尝试album文件夹
-            album_path = base_path / 'album' / playlist_name
-            if album_path.exists() and album_path.is_dir():
-                playlist_dir = album_path
-        
-        if not playlist_dir:
-            return jsonify({'status': 'error', 'message': f"未找到歌单目录: {playlist_name}"}), 404
-        
-        processed_count = sorter.remove_numbers(str(playlist_dir))
-        
-        return jsonify({'status': 'success', 'message': f"编号移除完成！共处理 {processed_count} 个文件。"})
+        cnt = MusicSorter().remove_numbers(str(target_dir))
+        return jsonify({'status': 'success', 'message': f"去序完成！处理了 {cnt} 个文件。"})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': f'移除编号失败: {e}'}), 500
+        return jsonify({'status': 'error', 'message': f"去序异常: {e}"}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
